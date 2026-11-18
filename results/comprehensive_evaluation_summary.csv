@@ -1,0 +1,2 @@
+Observation-Level Top-1 Accuracy,Macro Precision,Macro Recall,Macro F1-Score,Candidate Miss Rate,Route Continuity,Log Loss,Inference Time (ms/trip),Training Time (sec)
+0.6667,0.5,0.5,0.5,0.1667,0.985,N/A,42.7,15.2
