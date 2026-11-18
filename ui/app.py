@@ -1,95 +1,159 @@
-﻿import streamlit as st
+import time
+
 import folium
-from streamlit_folium import st_folium
-import requests
 import numpy as np
+import requests
+import streamlit as st
+from streamlit_folium import st_folium
 
-st.set_page_config(page_title="PathSnap UI - Laptop 2", layout="wide")
 
-st.title("🗺️ PathSnap: Distributed Map-Matching & Route Reconstruction")
-st.markdown("**PES University UE24CS352A Hackathon | Evaluator UI (Laptop 2)**")
+st.set_page_config(page_title="PathSnap Map Matching", layout="wide")
+st.title("🗺️ PathSnap: Map-Matching & Route Reconstruction")
+st.markdown("**PES University UE24CS352A Hackathon**")
 
-# Sidebar Configuration
 st.sidebar.header("Evaluation Settings")
-api_url = st.sidebar.text_input("Laptop 1 API Endpoint", value="http://localhost:8000")
-use_mock = st.sidebar.checkbox("Use Mock Data (Testing Mode)", value=True, help="Toggle on to test UI and maps without needing Laptop 1's backend running.")
+api_url = st.sidebar.text_input(
+    "Map-matching API URL", value="http://localhost:8000"
+).rstrip("/")
+use_mock = st.sidebar.checkbox(
+    "Use Mock Data (Testing Mode)",
+    value=True,
+    help="Show illustrative data without calling the map-matching API.",
+)
 
-# 10 Reserved Student Test Trips
 test_trips = [
-    "00000000", "00000007", "00000009", "00000040", "00000052",
-    "00000056", "00000065", "00000076", "00000077", "00000091"
+    "00000000",
+    "00000007",
+    "00000009",
+    "00000040",
+    "00000052",
+    "00000056",
+    "00000065",
+    "00000076",
+    "00000077",
+    "00000091",
 ]
+selected_trip = st.sidebar.selectbox("Select Student Test Trip", test_trips)
 
-selected_trip = st.sidebar.selectbox("Select Evaluation Trip ID", test_trips)
-
-# Initialize session state to persist results across map interactions
 if "result" not in st.session_state:
     st.session_state.result = None
 
 if st.sidebar.button("Run Map-Matching Pipeline"):
-    with st.spinner(f"Sending Trip {selected_trip} to API on Laptop 1..."):
-        if use_mock:
-            base_lat, base_lon = 49.85, 8.58
-            lats = base_lat + np.linspace(0, 0.02, 50)
-            lons = base_lon + np.linspace(0, 0.02, 50)
-            raw_track = [[lat, lon, float(i)] for i, (lat, lon) in enumerate(zip(lats, lons))]
-            pred_route = [[[lats[i], lons[i]], [lats[i+1], lons[i+1]]] for i in range(len(lats)-1)]
-            
-            st.session_state.result = {
-                "trip_id": selected_trip,
-                "metrics": {
-                    "top1_accuracy": 0.9420,
-                    "macro_f1": 0.9150,
-                    "route_continuity": 0.9850,
-                    "inference_time_ms": 45.2
-                },
-                "raw_track": raw_track,
-                "predicted_route_coords": pred_route
-            }
-        else:
-            try:
-                response = requests.post(f"{api_url}/predict", json={"trip_id": selected_trip}, timeout=10)
-                if response.status_code == 200:
-                    st.session_state.result = response.json()
-                else:
-                    st.error(f"API Error [{response.status_code}]: {response.text}")
-                    st.session_state.result = None
-            except Exception as e:
-                st.error(f"Failed to connect to Laptop 1 API at {api_url}: {e}")
-                st.session_state.result = None
+    st.session_state.result = None
+    if use_mock:
+        base_lat, base_lon = 49.85, 8.58
+        latitudes = base_lat + np.linspace(0, 0.02, 50)
+        longitudes = base_lon + np.linspace(0, 0.02, 50)
+        raw_track = [
+            [float(latitude), float(longitude)]
+            for latitude, longitude in zip(latitudes, longitudes, strict=True)
+        ]
+        predicted_route_coords = [
+            [raw_track[index], raw_track[index + 1]]
+            for index in range(len(raw_track) - 1)
+        ]
+        st.session_state.result = {
+            "trip_id": selected_trip,
+            "raw_track": raw_track,
+            "predicted_route_coords": predicted_route_coords,
+            "observations": [],
+            "is_mock": True,
+            "request_time_ms": 0.0,
+        }
+    else:
+        try:
+            start_time = time.perf_counter()
+            response = requests.post(
+                f"{api_url}/match",
+                json={"trip_id": selected_trip, "partition": "student_test"},
+                timeout=(5, 120),
+            )
+            response.raise_for_status()
+            result = response.json()
+            if not isinstance(result, dict):
+                raise ValueError("The API returned an invalid response.")
+            if not isinstance(result.get("raw_track"), list) or not isinstance(
+                result.get("predicted_route_coords"), list
+            ):
+                raise ValueError("The API response is missing map route data.")
+            result["is_mock"] = False
+            result["request_time_ms"] = (
+                time.perf_counter() - start_time
+            ) * 1000
+            st.session_state.result = result
+        except requests.RequestException as error:
+            st.error(f"Could not call the map-matching API at {api_url}: {error}")
+        except ValueError as error:
+            st.error(f"Could not use the map-matching API response: {error}")
 
-# Render results from session state if available
-if st.session_state.result is not None:
-    result = st.session_state.result
-    st.success(f"Successfully processed Trip {selected_trip}!")
-    
-    # Display Evaluation Metrics
-    m1, m2, m3, m4 = st.columns(4)
-    metrics = result.get("metrics", {})
-    m1.metric("Top-1 Accuracy", f"{metrics.get('top1_accuracy', 0):.4f}")
-    m2.metric("Macro F1-Score", f"{metrics.get('macro_f1', 0):.4f}")
-    m3.metric("Route Continuity", f"{metrics.get('route_continuity', 0):.4f}")
-    m4.metric("Inference Time", f"{metrics.get('inference_time_ms', 0):.1f} ms")
-
-    # Map Visualization (Mandatory Folium requirement)
-    st.subheader("📍 Interactive Route Reconstruction Map")
-    
-    track_pts = result.get("raw_track", [])
-    if track_pts:
-        center_lat = track_pts[0][0]
-        center_lon = track_pts[0][1]
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=14)
-
-        # Add Raw GPS points (Blue line/dots)
-        gps_coords = [[pt[0], pt[1]] for pt in track_pts]
-        folium.PolyLine(gps_coords, color="blue", weight=3, opacity=0.6, tooltip="Raw GPS Track").add_to(m)
-
-        # Add Predicted Route (Green line)
-        pred_coords = result.get("predicted_route_coords", [])
-        for segment in pred_coords:
-            folium.PolyLine(segment, color="green", weight=5, opacity=0.9, tooltip="Predicted Route (HMM + Viterbi)").add_to(m)
-
-        folium.LayerControl().add_to(m)
-        st_folium(m, width=1000, height=550, returned_objects=[])
+if st.session_state.result is None:
+    st.info("Select a trip and click **Run Map-Matching Pipeline**.")
 else:
-    st.info("Select a trip ID from the sidebar and click **Run Map-Matching Pipeline** to start.")
+    result = st.session_state.result
+    if result["is_mock"]:
+        st.warning(
+            "Mock data is being shown. It is illustrative and does not represent "
+            "a model prediction or evaluation result."
+        )
+    else:
+        st.success(f"Map matching completed for trip {result['trip_id']}.")
+        st.caption(f"Model used: {result['model_name']}")
+        observations = result.get("observations", [])
+        if observations:
+            transitions = observations[1:]
+            connected_count = sum(
+                bool(observation["transition_connected"])
+                for observation in transitions
+            )
+            continuity = (
+                f"{connected_count / len(transitions):.1%}"
+                if transitions
+                else "N/A"
+            )
+            average_score = float(
+                np.mean(
+                    [
+                        float(observation["top1_probability"])
+                        for observation in observations
+                    ]
+                )
+            )
+            metrics = st.columns(4)
+            metrics[0].metric("Observations", len(observations))
+            metrics[1].metric("Mean Top-1 Score", f"{average_score:.3f}")
+            metrics[2].metric("Connected Transitions", continuity)
+            metrics[3].metric(
+                "API Response Time",
+                f"{result['request_time_ms']:.1f} ms",
+            )
+        else:
+            st.info("The API returned no matched observations for this trip.")
+
+    st.subheader("Interactive Route Reconstruction Map")
+    track_points = result.get("raw_track", [])
+    if track_points:
+        map_view = folium.Map(
+            location=track_points[0],
+            zoom_start=14,
+        )
+        folium.PolyLine(
+            track_points,
+            color="blue",
+            weight=3,
+            opacity=0.7,
+            tooltip="GPS track",
+        ).add_to(map_view)
+
+        for segment in result.get("predicted_route_coords", []):
+            folium.PolyLine(
+                segment,
+                color="green",
+                weight=5,
+                opacity=0.9,
+                tooltip="Predicted road route",
+            ).add_to(map_view)
+
+        folium.LayerControl().add_to(map_view)
+        st_folium(map_view, width=1000, height=550, returned_objects=[])
+    else:
+        st.warning("No GPS track coordinates were returned for this trip.")

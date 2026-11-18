@@ -64,6 +64,8 @@ class MatchResponse(BaseModel):
     candidate_scores: list[CandidateScore]
     observations: list[ObservationMatch]
     route_sequence: list[RouteStep]
+    raw_track: list[list[float]]
+    predicted_route_coords: list[list[list[float]]]
 
 
 class EvaluationRequest(BaseModel):
@@ -110,6 +112,50 @@ def _json_safe_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
             value = None
         result[key] = value
     return result
+
+
+def _load_map_geometry(
+    cleaned_trip_dir: Path, route_sequence: pd.DataFrame
+) -> tuple[list[list[float]], list[list[list[float]]]]:
+    track = pd.read_csv(
+        cleaned_trip_dir / "track.csv", usecols=["latitude", "longitude"]
+    )
+    raw_track = track[["latitude", "longitude"]].to_numpy(dtype=float)
+    if raw_track.size == 0 or not np.isfinite(raw_track).all():
+        raise ValueError(f"GPS track is empty or non-finite: {cleaned_trip_dir}")
+
+    nodes = pd.read_csv(
+        cleaned_trip_dir / "nodes.csv",
+        usecols=["node_id", "latitude", "longitude"],
+    )
+    arcs = pd.read_csv(
+        cleaned_trip_dir / "arcs.csv",
+        usecols=["arc_id", "from_node", "to_node"],
+    )
+    if nodes["node_id"].duplicated().any() or arcs["arc_id"].duplicated().any():
+        raise ValueError(f"Duplicate node or arc IDs in {cleaned_trip_dir}")
+
+    node_positions = {
+        int(row.node_id): [float(row.latitude), float(row.longitude)]
+        for row in nodes.itertuples(index=False)
+    }
+    arc_endpoints = {
+        int(row.arc_id): (int(row.from_node), int(row.to_node))
+        for row in arcs.itertuples(index=False)
+    }
+    predicted_route_coords = []
+    for arc_id in route_sequence["arc_id"].to_numpy(dtype=int):
+        try:
+            from_node, to_node = arc_endpoints[int(arc_id)]
+            predicted_route_coords.append(
+                [node_positions[from_node], node_positions[to_node]]
+            )
+        except KeyError as error:
+            raise ValueError(
+                f"Route arc or endpoint is missing from {cleaned_trip_dir}: {arc_id}"
+            ) from error
+
+    return raw_track.tolist(), predicted_route_coords
 
 
 def create_app(
@@ -307,6 +353,10 @@ def create_app(
             probabilities,
             app.state.cleaned_root / request.partition / request.trip_id,
         )
+        raw_track, predicted_route_coords = _load_map_geometry(
+            app.state.cleaned_root / request.partition / request.trip_id,
+            route_sequence,
+        )
 
         scored = frame[["observation_id", "candidate_arc_id", "candidate_rank"]].copy()
         scored["probability"] = probabilities
@@ -365,6 +415,8 @@ def create_app(
             candidate_scores=candidate_scores,
             observations=observation_matches,
             route_sequence=route_steps,
+            raw_track=raw_track,
+            predicted_route_coords=predicted_route_coords,
         )
 
     @app.post("/evaluate", response_model=EvaluationResponse)
